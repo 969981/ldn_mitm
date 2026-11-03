@@ -83,10 +83,19 @@ jobs:
           make -C /tmp/libnx -j4
           make -C /tmp/libnx install
 
+      - name: Align Atmosphere-libs with current libnx (upstream nightly strategy)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C Atmosphere-libs fetch --depth=1 origin master
+          git -C Atmosphere-libs checkout --detach FETCH_HEAD
+          echo "Using Atmosphere-libs $(git -C Atmosphere-libs rev-parse --short HEAD)"
+
       - name: Build all components using original Makefile
         shell: bash
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           make -j4
 
       - name: Check generated SD structure and prepare release
