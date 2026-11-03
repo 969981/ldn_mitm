@@ -1,0 +1,171 @@
+name: Defender upstream sync and release
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [add-setprotocol]
+    paths:
+      - '.github/workflows/defender-sync-release.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ldn-mitm-defender-sync-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync DefenderOfHyrule master to defender
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
+      short_sha: ${{ steps.sync.outputs.short_sha }}
+    steps:
+      - name: Checkout controller branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Check and synchronize dedicated defender branch
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add defender-upstream https://github.com/DefenderOfHyrule/ldn_mitm.git
+          git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master +refs/heads/defender:refs/remotes/origin/defender
+          git fetch --no-tags defender-upstream +refs/heads/master:refs/remotes/defender-upstream/master
+          before="$(git rev-parse refs/remotes/origin/defender)"
+          upstream="$(git rev-parse refs/remotes/defender-upstream/master)"
+          original_master="$(git rev-parse refs/remotes/origin/master)"
+          echo "upstream_sha=$upstream" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${upstream:0:8}" >> "$GITHUB_OUTPUT"
+          if [[ "$before" == "$upstream" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Defender upstream unchanged ($upstream)"
+          elif git merge-base --is-ancestor "$before" "$upstream"; then
+            git push origin "$upstream:refs/heads/defender"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Fast-forwarded defender branch to $upstream"
+          elif [[ "$before" == "$original_master" ]]; then
+            # Initial creation only: defender was deliberately bootstrapped from our master.
+            # Enforce a lease to avoid overwriting any concurrent changes.
+            git push --force-with-lease="refs/heads/defender:$before" origin "$upstream:refs/heads/defender"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Initialized dedicated defender branch to exact upstream master ($upstream)"
+          else
+            echo "::error::defender branch diverged; refusing to overwrite changes."
+            exit 1
+          fi
+
+  build:
+    name: Compile Defender sysmodule, config NRO and Tesla overlay
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - name: Checkout exact Defender source and submodules
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.upstream_sha }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Cache C/C++ compilation
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ldn-mitm-defender
+          max-size: 600M
+
+      - name: Install current libnx (matching Defender's latest release)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/switchbrew/libnx.git /tmp/ldn-defender-libnx
+          make -C /tmp/ldn-defender-libnx -j4 PREFIX="ccache aarch64-none-elf-"
+          make -C /tmp/ldn-defender-libnx install
+
+      - name: Compile all components with the upstream Makefile
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          make -j4 PREFIX="ccache aarch64-none-elf-"
+
+      - name: Verify Switch installation layout and package ZIP
+        shell: bash
+        id: package
+        run: |
+          set -euo pipefail
+          sd=out/sd
+          test -s "$sd/atmosphere/contents/4200000000000010/exefs.nsp"
+          test -f "$sd/atmosphere/contents/4200000000000010/flags/boot2.flag"
+          test -s "$sd/switch/ldnmitm_config/ldnmitm_config.nro"
+          test -s "$sd/switch/.overlays/ldnmitm_config.ovl"
+          version="$(sed -n 's/^TARGET_VERSION[[:space:]]*:=[[:space:]]*//p' ldn_mitm/Makefile | head -n1 | tr -d '\r' | xargs)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mkdir -p release
+          file="ldn_mitm-defender-v${version}-${{ needs.sync.outputs.short_sha }}.zip"
+          (cd "$sd" && zip -qr "$GITHUB_WORKSPACE/release/$file" atmosphere switch)
+          unzip -t "release/$file" >/dev/null
+          (cd release && sha256sum "$file" > "$file.sha256")
+          printf 'Source: https://github.com/DefenderOfHyrule/ldn_mitm\nBranch: master\nCommit: %s\nVersion: %s\nBuild: devkitPro + switchbrew/libnx + ccache\n' \
+            '${{ needs.sync.outputs.upstream_sha }}' "$version" > release/BUILD-INFO.txt
+
+      - name: Upload verified release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: ldn-mitm-defender-release
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish separate Defender Release
+    needs: [sync, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download compiled release files
+        uses: actions/download-artifact@v4
+        with:
+          name: ldn-mitm-defender-release
+          path: release
+
+      - name: Publish Defender-specific GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: defender-v${{ needs.build.outputs.version }}-${{ needs.sync.outputs.short_sha }}
+          name: "ldn_mitm Defender v${{ needs.build.outputs.version }} (${{ needs.sync.outputs.short_sha }})"
+          target_commitish: ${{ needs.sync.outputs.upstream_sha }}
+          make_latest: false
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          body: |
+            Automatically synchronized from [DefenderOfHyrule/ldn_mitm](https://github.com/DefenderOfHyrule/ldn_mitm) master.
+            
+            Source commit: `${{ needs.sync.outputs.upstream_sha }}`
+            Tracking branch: `defender`
+            Built independently from the original `spacemeowx2/ldn_mitm` branch.
+            
+            Extract the ZIP into the root of a Switch SD card.
+            Includes Atmosphere system module, configuration app and Tesla overlay.
+            This is an independently compiled community build, not an official upstream release.
+          files: |
+            release/ldn_mitm-defender-v*.zip
+            release/ldn_mitm-defender-v*.zip.sha256
+            release/BUILD-INFO.txt
