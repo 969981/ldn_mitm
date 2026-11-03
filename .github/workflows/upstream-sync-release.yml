@@ -1,0 +1,153 @@
+name: Sync upstream, build and release ldn_mitm
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - add-setprotocol
+    paths:
+      - '.github/workflows/upstream-sync-release.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ldn-mitm-upstream-sync-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Check upstream master and fast-forward local master
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      sha: ${{ steps.sync.outputs.sha }}
+      short_sha: ${{ steps.sync.outputs.short_sha }}
+    steps:
+      - name: Checkout with full history for upstream comparison
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Synchronize only when upstream changes
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/spacemeowx2/ldn_mitm.git
+          git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
+          git fetch --no-tags upstream +refs/heads/master:refs/remotes/upstream/master
+          before="$(git rev-parse refs/remotes/origin/master)"
+          after="$(git rev-parse refs/remotes/upstream/master)"
+          echo "sha=$after" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${after:0:8}" >> "$GITHUB_OUTPUT"
+          if [[ "$before" == "$after" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No upstream changes: $after"
+          else
+            if ! git merge-base --is-ancestor "$before" "$after"; then
+              echo "::error::Local master diverged from upstream; refusing to force-push."
+              exit 1
+            fi
+            git push origin "$after:refs/heads/master"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Updated master: $before -> $after"
+          fi
+
+  build:
+    name: Build ldn_mitm sysmodule, config app and overlay
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' || github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: devkitpro/devkita64:latest
+    steps:
+      - name: Checkout upstream source and git submodules
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+          submodules: recursive
+
+      - name: Install libnx from current switchbrew sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/switchbrew/libnx.git /tmp/libnx
+          make -C /tmp/libnx -j4
+          make -C /tmp/libnx install
+
+      - name: Build all components using original Makefile
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -j4
+
+      - name: Check generated SD structure and prepare release
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="out/sd"
+          test -s "$root/atmosphere/contents/4200000000000010/exefs.nsp"
+          test -f "$root/atmosphere/contents/4200000000000010/flags/boot2.flag"
+          test -s "$root/switch/ldnmitm_config/ldnmitm_config.nro"
+          test -s "$root/switch/.overlays/ldnmitm_config.ovl"
+          mkdir -p release
+          package="ldn_mitm-autosync-${{ needs.sync.outputs.short_sha }}.zip"
+          ( cd "$root" && zip -qr "$GITHUB_WORKSPACE/release/$package" atmosphere switch )
+          unzip -t "release/$package" >/dev/null
+          ( cd release && sha256sum "$package" > "$package.sha256" )
+          printf 'Source: https://github.com/spacemeowx2/ldn_mitm\nBranch: master\nCommit: %s\nBuild: devkitpro/devkita64, switchbrew/libnx (built from source), make -j4\n' \
+            '${{ needs.sync.outputs.sha }}' > release/BUILD-INFO.txt
+          find release -type f -maxdepth 1 -printf '%f (%s bytes)\n'
+
+      - name: Upload verified release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: ldn-mitm-release
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish compiled ZIP to Releases
+    needs: [sync, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified compilation output
+        uses: actions/download-artifact@v4
+        with:
+          name: ldn-mitm-release
+          path: release
+
+      - name: Publish commit-specific release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: autosync-${{ needs.sync.outputs.short_sha }}
+          name: ldn_mitm upstream ${{ needs.sync.outputs.short_sha }}
+          target_commitish: ${{ needs.sync.outputs.sha }}
+          make_latest: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          body: |
+            Automatically compiled from [spacemeowx2/ldn_mitm](https://github.com/spacemeowx2/ldn_mitm) master.
+            
+            Upstream commit: \`${{ needs.sync.outputs.sha }}\`
+            Compiled with devkitPro and fresh switchbrew/libnx.
+            
+            Extract the ZIP at the root of your Switch SD card.
+            Includes ldn_mitm Atmosphère sysmodule, configuration NRO and Tesla overlay.
+            See BUILD-INFO.txt and the attached SHA-256 checksum.
+            This is a community automated build, not an official tagged upstream release.
+          files: |
+            release/ldn_mitm-autosync-*.zip
+            release/ldn_mitm-autosync-*.zip.sha256
+            release/BUILD-INFO.txt
