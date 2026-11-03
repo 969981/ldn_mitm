@@ -20,9 +20,8 @@ namespace ams::mitm::ldn {
     Result IClientProcessMonitor::RegisterClient(const sf::ClientProcessId &client_process_id) {
         LogFormat("IClientProcessMonitor::RegisterClient pid: %" PRIu64, client_process_id.GetValue());
         
-        // This is a stub implementation for firmware 18.0.0+ compatibility
-        // Pokemon Legends Z-A requires this function but doesn't use its functionality
-        // Just return success
+        // stub for 18.0.0+
+
         return ResultSuccess();
     }
 }

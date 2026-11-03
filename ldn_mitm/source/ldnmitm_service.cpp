@@ -40,12 +40,12 @@ namespace ams::mitm::ldn {
 
         return sm::mitm::ResultShouldForwardToSession();
     }
-
-    Result LdnMitMService::CreateClientProcessMonitor(sf::Out<sf::SharedPointer<IClientProcessMonitorInterface>> out) {
+    
+    Result LdnMitMService::CreateClientProcessMonitor(sf::Out<sf::SharedPointer<IClientProcessMonitorInterface>> out) {        
         LogFormat("CreateClientProcessMonitor called");
 
-        // Always create the monitor, regardless of ldn_mitm being enabled
-        // This is required for firmware 18.0.0+ compatibility (Pokemon Legends Z-A)
+        // stub for 18.0.0+
+
         out.SetValue(sf::CreateSharedObjectEmplaced<IClientProcessMonitorInterface, IClientProcessMonitor>());
         return 0;
     }

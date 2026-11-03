@@ -1,5 +1,6 @@
 #include "ldn_icommunication.hpp"
 #include <arpa/inet.h>
+#include "nifm_manager.hpp"
 
 namespace ams::mitm::ldn {
     static_assert(sizeof(NetworkInfo) == 0x480, "sizeof(NetworkInfo) should be 0x480");
@@ -83,8 +84,15 @@ namespace ams::mitm::ldn {
     }
 
     Result ICommunicationService::GetIpv4Address(sf::Out<u32> address, sf::Out<u32> netmask) {
+        ScopedNifmSession session;
+        Result rc = session.GetResult();
+        if (R_FAILED(rc)) {
+            LogFormat("GetIpv4Address failed to acquire nifm session: %x", rc);
+            return rc;
+        }
+
         u32 gateway, primary_dns, secondary_dns;
-        Result rc = nifmGetCurrentIpConfigInfo(address.GetPointer(), netmask.GetPointer(), &gateway, &primary_dns, &secondary_dns);
+        rc = nifmGetCurrentIpConfigInfo(address.GetPointer(), netmask.GetPointer(), &gateway, &primary_dns, &secondary_dns);
 
         address.SetValue(ntohl(address.GetValue()));
         netmask.SetValue(ntohl(netmask.GetValue()));
@@ -183,6 +191,25 @@ namespace ams::mitm::ldn {
     }
 
     Result ICommunicationService::SetWirelessControllerRestriction() {
+        return 0;
+    }
+
+    Result ICommunicationService::SetProtocol(u32 protocol) {
+        LogFormat("SetProtocol called, protocol=%u", protocol);
+        
+        // Normalize protocol according to Nintendo documentation
+        // SDK passes 1 when input protocol is 0 or 1
+        // Value 3 is passed directly if specified
+        if (protocol == 0 || protocol == 1) {
+            this->m_protocol = 1;  // NX protocol
+        } else if (protocol == 3) {
+            this->m_protocol = 3;  // S2 protocol (Switch 2)
+        } else {
+            LogFormat("SetProtocol: Invalid protocol %u, defaulting to 1", protocol);
+            this->m_protocol = 1;
+        }
+        
+        LogFormat("SetProtocol: Protocol set to %u", this->m_protocol);
         return 0;
     }
 

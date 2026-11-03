@@ -49,6 +49,8 @@ namespace ams {
         }
 
         constexpr const ::SocketInitConfig LibnxSocketInitConfig = {
+            /*.bsdsockets_version = 1,*/
+
             .tcp_tx_buf_size = 0x800,
             .tcp_rx_buf_size = 0x1000,
             .tcp_tx_buf_max_size = 0x2000,
@@ -216,7 +218,10 @@ namespace ams {
 
             /* Initialize other services. */
 
-            R_ABORT_UNLESS(nifmInitialize(NifmServiceType_Admin));
+            /* nifm is lazily initialized on demand via NifmSessionManager
+             * this avoids exhausting the limited nifm:a sessions (max 2 sessions system-wide)
+             * and allows Internet Settings to function properly when multiple sysmodules need nifm:a
+             */
             R_ABORT_UNLESS(bsdInitialize(&LibnxBsdInitConfig, LibnxSocketInitConfig.num_bsd_sessions, LibnxSocketInitConfig.bsd_service_type));
             R_ABORT_UNLESS(socketInitialize(&LibnxSocketInitConfig));
         }

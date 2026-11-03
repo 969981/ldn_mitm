@@ -8,6 +8,7 @@
 #include "ldnmitm_config.hpp"
 #include "debug.hpp"
 #include "interfaces/iservice.hpp"
+#include "ldn_client_process_monitor.hpp"
 
 namespace ams::mitm::ldn {
 
