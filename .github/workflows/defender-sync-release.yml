@@ -26,6 +26,7 @@ jobs:
       changed: ${{ steps.sync.outputs.changed }}
       upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
       short_sha: ${{ steps.sync.outputs.short_sha }}
+      sync_sha: ${{ steps.sync.outputs.sync_sha }}
     steps:
       - name: Checkout controller branch
         uses: actions/checkout@v4
@@ -33,36 +34,42 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Check and synchronize dedicated defender branch
+      - name: Import Defender source while preserving local workflow files
         id: sync
         shell: bash
         run: |
           set -euo pipefail
           git remote add defender-upstream https://github.com/DefenderOfHyrule/ldn_mitm.git
-          git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master +refs/heads/defender:refs/remotes/origin/defender
+          git fetch --no-tags origin +refs/heads/defender:refs/remotes/origin/defender
           git fetch --no-tags defender-upstream +refs/heads/master:refs/remotes/defender-upstream/master
           before="$(git rev-parse refs/remotes/origin/defender)"
           upstream="$(git rev-parse refs/remotes/defender-upstream/master)"
-          original_master="$(git rev-parse refs/remotes/origin/master)"
+          previous="$(git show "$before:.defender-upstream-sha" 2>/dev/null || true)"
           echo "upstream_sha=$upstream" >> "$GITHUB_OUTPUT"
           echo "short_sha=${upstream:0:8}" >> "$GITHUB_OUTPUT"
-          if [[ "$before" == "$upstream" ]]; then
+          if [[ "$previous" == "$upstream" ]]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Defender upstream unchanged ($upstream)"
-          elif git merge-base --is-ancestor "$before" "$upstream"; then
-            git push origin "$upstream:refs/heads/defender"
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "Fast-forwarded defender branch to $upstream"
-          elif [[ "$before" == "$original_master" ]]; then
-            # Initial creation only: defender was deliberately bootstrapped from our master.
-            # Enforce a lease to avoid overwriting any concurrent changes.
-            git push --force-with-lease="refs/heads/defender:$before" origin "$upstream:refs/heads/defender"
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "Initialized dedicated defender branch to exact upstream master ($upstream)"
-          else
-            echo "::error::defender branch diverged; refusing to overwrite changes."
-            exit 1
+            echo "sync_sha=$before" >> "$GITHUB_OUTPUT"
+            echo "No new Defender commits: $upstream"
+            exit 0
           fi
+
+          # GitHub Actions GITHUB_TOKEN cannot push changes to .github/workflows.
+          # Import the exact upstream source tree while preserving local workflow paths.
+          # Build and release are controlled by THIS workflow on the default branch.
+          git read-tree --reset "$upstream^{tree}"
+          git restore --source="$before" --staged -- .github/workflows
+
+          printf '%s\n' "$upstream" > .defender-upstream-sha
+          git add .defender-upstream-sha
+          tree="$(git write-tree)"
+          commit="$(printf 'sync: DefenderOfHyrule/ldn_mitm %s [skip ci]\n' "$upstream" |
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit-tree "$tree" -p "$before")"
+
+          git push origin "$commit:refs/heads/defender"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "sync_sha=$commit" >> "$GITHUB_OUTPUT"
+          echo "Synced Defender source $upstream to local commit $commit (CI preserved)"
 
   build:
     name: Compile Defender sysmodule, config NRO and Tesla overlay
@@ -79,7 +86,7 @@ jobs:
       - name: Checkout exact Defender source and submodules
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.sync.outputs.upstream_sha }}
+          ref: ${{ needs.sync.outputs.sync_sha }}
           fetch-depth: 0
           submodules: recursive
 
@@ -151,7 +158,7 @@ jobs:
         with:
           tag_name: defender-v${{ needs.build.outputs.version }}-${{ needs.sync.outputs.short_sha }}
           name: "ldn_mitm Defender v${{ needs.build.outputs.version }} (${{ needs.sync.outputs.short_sha }})"
-          target_commitish: ${{ needs.sync.outputs.upstream_sha }}
+          target_commitish: ${{ needs.sync.outputs.sync_sha }}
           make_latest: false
           overwrite_files: true
           fail_on_unmatched_files: true
@@ -159,7 +166,7 @@ jobs:
             Automatically synchronized from [DefenderOfHyrule/ldn_mitm](https://github.com/DefenderOfHyrule/ldn_mitm) master.
             
             Source commit: `${{ needs.sync.outputs.upstream_sha }}`
-            Tracking branch: `defender`
+            Tracking branch: `defender` (source snapshot, local CI files preserved)
             Built independently from the original `spacemeowx2/ldn_mitm` branch.
             
             Extract the ZIP into the root of a Switch SD card.
